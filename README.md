@@ -52,7 +52,7 @@ ledger semantics, durable idempotency, and safe concurrency. See
 
 ## Stack
 
-- Go 1.24+, standard library `net/http` (Go 1.22 method-aware `ServeMux`)
+- Go 1.25+, standard library `net/http` (Go 1.22 method-aware `ServeMux`)
 - PostgreSQL 16, `database/sql` with the `pgx` driver
 - `golang-migrate` for schema migrations, embedded into the binary via
   `go:embed`
@@ -1549,7 +1549,7 @@ Read from environment variables at startup. See
 
 ## How to run
 
-Prerequisites: Go 1.24+, Docker (for local Postgres and integration tests).
+Prerequisites: Go 1.25+, Docker (for local Postgres and integration tests).
 
 ```sh
 make db-up         # starts postgres on :5432 via docker compose

@@ -36,13 +36,20 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          # 1.25 matches the floor declared in go.mod (driven by
+          # pgx/v5 ≥ 5.9.0 which raised its minimum to 1.25.0).
+          go-version: '1.25'
 
       - name: Install golangci-lint
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
-            | sh -s -- -b "$HOME/.local/bin" v1.64.8
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        # Build from source via `go install` so the resulting binary
+        # is compiled with the same Go toolchain the workflow uses
+        # above. The published binary releases of golangci-lint
+        # v1.64.8 were built with Go 1.24, which trips the
+        # "language version used to build golangci-lint is lower
+        # than the targeted Go version" check on any module that
+        # declares `go 1.25` in go.mod. Building locally sidesteps
+        # the check.
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
 
       - name: gofmt check
         run: |

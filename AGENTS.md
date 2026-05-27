@@ -17,7 +17,7 @@ is cheap; a duplicate debit is not.
 
 ## 0. Project context (read first)
 
-- **Language / runtime:** Go 1.24+.
+- **Language / runtime:** Go 1.25+ (floor driven by pgx/v5 ≥ 5.9.0).
 - **HTTP:** stdlib `net/http` with Go 1.22 method-aware `ServeMux`. No web
   framework.
 - **Database:** PostgreSQL 16 via `database/sql` + the `pgx` driver. No ORM.
