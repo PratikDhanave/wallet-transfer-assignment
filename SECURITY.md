@@ -17,12 +17,9 @@ and is exercised by:
   used to enumerate path parameters (cardinality leak).
 - The lint suite — `golangci-lint` runs `gosec` on every push
   via [.github/workflows/ci.yml](.github/workflows/ci.yml).
-- [.github/workflows/codeql.yml](.github/workflows/codeql.yml) —
-  GitHub CodeQL Go analyzer with the `security-and-quality`
-  query suite, on push / PR / weekly.
-- Optional: [.github/workflows/claude-review.yml](.github/workflows/claude-review.yml)
-  invokes the Claude Code Action with the AGENTS.md security
-  prompt on every PR.
+- **GitHub default code scanning** (CodeQL on Go) is enabled at
+  the repository level and runs on push and PR — see Settings →
+  Code security → Code scanning.
 
 ## Reporting a vulnerability
 
@@ -54,8 +51,8 @@ In-scope:
 Out-of-scope:
 
 - Findings in upstream dependencies (please report directly to
-  the respective project — CodeQL + `govulncheck` already cover
-  the well-known surface).
+  the respective project — GitHub default CodeQL +
+  `govulncheck` already cover the well-known surface).
 - Findings in third-party services this repo connects to
   (PostgreSQL, Docker, etc.).
 
