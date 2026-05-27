@@ -91,40 +91,39 @@ dependencies and can be referenced from any layer.
 flowchart LR
     Client([HTTP client])
 
-    subgraph Entry [cmd/server]
-        Mux[net/http ServeMux<br/>method-aware patterns]
+    subgraph Entry["cmd/server"]
+        Mux["net/http ServeMux<br/>method-aware patterns"]
     end
 
-    subgraph H [internal/handler]
-        TH[TransferHandler<br/>POST /transfers]
-        WH[WalletHandler<br/>POST /wallets<br/>GET /wallets/&#123;id&#125;]
+    subgraph H["internal/handler"]
+        TH["TransferHandler<br/>POST /transfers"]
+        WH["WalletHandler<br/>POST /wallets<br/>GET /wallets/:id"]
     end
 
-    subgraph S [internal/service]
-        TS[TransferService<br/>idempotency + tx orchestration]
-        WS[WalletService]
+    subgraph S["internal/service"]
+        TS["TransferService<br/>idempotency + tx orchestration"]
+        WS["WalletService"]
     end
 
-    subgraph R [internal/repository]
-        direction TB
-        IF[Interfaces:<br/>WalletRepository<br/>TransferRepository<br/>LedgerRepository<br/>IdempotencyRepository<br/>TxManager]
-        subgraph PG [internal/repository/postgres]
-            PWR[WalletRepo]
-            PTR[TransferRepo]
-            PLR[LedgerRepo]
-            PIR[IdempotencyRepo]
-            PTX[TxManager]
+    subgraph R["internal/repository"]
+        IF["Interfaces:<br/>WalletRepository<br/>TransferRepository<br/>LedgerRepository<br/>IdempotencyRepository<br/>TxManager"]
+        subgraph PG["internal/repository/postgres"]
+            PWR["WalletRepo"]
+            PTR["TransferRepo"]
+            PLR["LedgerRepo"]
+            PIR["IdempotencyRepo"]
+            PTX["TxManager"]
         end
     end
 
-    subgraph DB[PostgreSQL]
+    subgraph DB["PostgreSQL"]
         W[(wallets)]
         T[(transfers)]
         L[(ledger_entries)]
         I[(idempotency_records)]
     end
 
-    D[internal/domain<br/>Wallet, Transfer, LedgerEntry<br/>state machine, errors]
+    D["internal/domain<br/>Wallet, Transfer, LedgerEntry<br/>state machine, errors"]
 
     Client --> Mux
     Mux --> TH
@@ -192,7 +191,7 @@ flowchart TB
         loki["Log aggregator<br/>(Loki / Datadog / etc.)"]
     end
 
-    client -->|"POST /transfers<br/>GET /wallets/{id}<br/>GET /wallets/{id}/transfers"| api
+    client -->|"POST /transfers<br/>GET /wallets/:id<br/>GET /wallets/:id/transfers"| api
     api --> mw --> biz
     biz -->|"BEGIN; ... COMMIT;"| pg
 
@@ -471,7 +470,7 @@ sequenceDiagram
     participant S as TransferService
     participant DB as Postgres
 
-    C->>H: POST /transfers {key, from, to, amount}
+    C->>H: POST /transfers (key, from, to, amount)
     H->>S: Create(req)
     Note over S: validate + hash request
 
@@ -494,7 +493,7 @@ sequenceDiagram
     S->>DB: UPDATE transfers SET state=PROCESSED
     S->>DB: COMMIT
 
-    S-->>H: Transfer{state=PROCESSED}
+    S-->>H: Transfer(state=PROCESSED)
     H-->>C: 200 OK + JSON body
 ```
 
@@ -514,7 +513,7 @@ sequenceDiagram
     C->>H: POST /transfers (same key, same body)
     H->>S: Create(req)
     S->>DB: SELECT idempotency_records WHERE key=$1
-    DB-->>S: row{request_hash, transfer_id}
+    DB-->>S: row(request_hash, transfer_id)
     Note over S: stored hash == new hash ✓
     S->>DB: SELECT transfers WHERE id=transfer_id
     DB-->>S: original Transfer
@@ -585,7 +584,7 @@ sequenceDiagram
 
     S->>DB: UPDATE transfers SET state=FAILED,<br/>failure_reason='insufficient funds'
     S->>DB: COMMIT
-    S-->>C: Transfer{state=FAILED, failureReason=...}
+    S-->>C: Transfer(state=FAILED, failureReason=...)
 ```
 
 No balance changes are persisted; no ledger entries are written; the
@@ -631,7 +630,7 @@ sequenceDiagram
     participant T as TransferRepo
     participant DB as Postgres
 
-    C->>H: GET /transfers/{id}
+    C->>H: GET /transfers/:id
     H->>H: uuid.Parse(id)
     Note over H: parse fail ⇒ 400
     H->>S: GetTransfer(id)
@@ -661,7 +660,7 @@ sequenceDiagram
     participant T as TransferRepo
     participant DB as Postgres
 
-    C->>H: GET /wallets/{id}/transfers?limit=N&before=TS
+    C->>H: GET /wallets/:id/transfers?limit=N&before=TS
     H->>H: parseListQuery(r) → limit, before
     Note over H: invalid query ⇒ 400
     H->>S: ListTransfersByWallet(id, limit, before)
@@ -676,7 +675,7 @@ sequenceDiagram
         S->>S: next = nil
     end
     S-->>H: rows + next
-    H-->>C: 200 OK<br/>{ transfers: [...], nextCursor: TS? }
+    H-->>C: 200 OK<br/>( transfers: [...], nextCursor: TS? )
 ```
 
 ### Request lifecycle (end-to-end)
@@ -748,10 +747,10 @@ sequenceDiagram
     S->>T: UpdateState(PROCESSED)
 
     TXM->>DB: COMMIT
-    S-->>H: Transfer{state=PROCESSED}
+    S-->>H: Transfer(state=PROCESSED)
     H-->>REC: 200 + body
     REC-->>ACL: pass-through
-    ACL->>LOG: slog.Info "http_request"<br/>{request_id, method, path, status, duration_ms}
+    ACL->>LOG: slog.Info "http_request"<br/>(request_id, method, path, status, duration_ms)
     ACL-->>RID: response
     RID-->>C: 200 + JSON + X-Request-Id header
 ```
@@ -794,7 +793,7 @@ sequenceDiagram
     participant L as LedgerRepo
     participant DB as PostgreSQL
 
-    C->>MW: POST /transfers {key, from, to, amount}
+    C->>MW: POST /transfers (key, from, to, amount)
     MW->>H: ServeHTTP
     H->>H: json.Decode(DisallowUnknownFields)
     H->>S: Create(req)
@@ -805,7 +804,7 @@ sequenceDiagram
     I->>DB: SELECT idempotency_records WHERE key=$1
 
     alt key already exists (fast-path replay)
-        DB-->>I: row{transfer_id, request_hash}
+        DB-->>I: row (transfer_id, request_hash)
         I-->>S: IdempotencyRecord
         alt hash matches
             S->>T: Get(transfer_id)
@@ -859,7 +858,7 @@ sequenceDiagram
                 T->>DB: UPDATE transfers
                 S-->>TXM: nil (commit FAILED outcome)
                 TXM->>DB: COMMIT
-                S-->>H: Transfer{FAILED}
+                S-->>H: Transfer (state=FAILED)
                 H-->>C: 200 OK with state=FAILED
             else sufficient funds (happy path)
                 S->>W: UpdateBalance(from, -amount)
@@ -874,13 +873,13 @@ sequenceDiagram
                 T->>DB: UPDATE transfers
                 S-->>TXM: nil
                 TXM->>DB: COMMIT
-                S-->>H: Transfer{PROCESSED}
+                S-->>H: Transfer (state=PROCESSED)
                 H-->>C: 200 OK
             end
         end
     end
 
-    Note over MW: AccessLog emits<br/>http_request {request_id, method, path, status, duration_ms}
+    Note over MW: AccessLog emits<br/>http_request (request_id, method, path, status, duration_ms)
 ```
 
 **Key takeaways**
@@ -913,25 +912,25 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     par fire same key K simultaneously
-        A->>SA: POST /transfers {key=K, ...}
+        A->>SA: POST /transfers (key=K, ...)
         SA->>DB: SELECT idempotency_records WHERE key=K
         DB-->>SA: ErrNoRows
         SA->>DB: BEGIN (txA)
-        SA->>DB: INSERT idempotency_records {key=K, ...}
+        SA->>DB: INSERT idempotency_records (key=K, ...)
         Note over DB: txA holds the PK index lock on K
     and
-        B->>SB: POST /transfers {key=K, ...}
+        B->>SB: POST /transfers (key=K, ...)
         SB->>DB: SELECT idempotency_records WHERE key=K
         DB-->>SB: ErrNoRows
         SB->>DB: BEGIN (txB)
-        SB->>DB: INSERT idempotency_records {key=K, ...}
+        SB->>DB: INSERT idempotency_records (key=K, ...)
         Note over DB: txB blocks on the PK<br/>(waiting for txA)
     end
 
     SA->>DB: …continue transfer flow (lock wallets,<br/>insert ledger, update state)…
     SA->>DB: COMMIT (txA)
     DB-->>SA: ok
-    SA-->>A: 200 OK + Transfer{id=T1}
+    SA-->>A: 200 OK + Transfer(id=T1)
 
     Note over DB: txA released its PK lock<br/>txB's INSERT now resumes…
     DB-->>SB: 23505 unique_violation
@@ -942,8 +941,8 @@ sequenceDiagram
     SB->>DB: SELECT idempotency_records WHERE key=K
     DB-->>SB: row from txA
     SB->>DB: SELECT transfers WHERE id=T1
-    DB-->>SB: Transfer{id=T1}
-    SB-->>B: 200 OK + Transfer{id=T1}
+    DB-->>SB: Transfer(id=T1)
+    SB-->>B: 200 OK + Transfer(id=T1)
 
     Note over A,B: Both clients received the SAME transfer id (T1).<br/>The source wallet was debited EXACTLY ONCE.<br/>Verified by TestCreateTransfer_ConcurrentSameKey at N=25.
 ```
@@ -984,7 +983,7 @@ sequenceDiagram
     DB-->>S: [T9, T8]   ← newest first
     S->>S: page is full ⇒ next = T8.CreatedAt
     S-->>H: rows=[T9,T8], next=T8.createdAt
-    H-->>C: 200 OK<br/>{transfers:[T9,T8], nextCursor:"2026-…"}
+    H-->>C: 200 OK<br/>(transfers:[T9,T8], nextCursor:"2026-…")
 
     Note over C: Subsequent page — pass nextCursor as `before`.
     C->>H: GET /wallets/W/transfers?limit=2&before=T8.createdAt
@@ -992,7 +991,7 @@ sequenceDiagram
     S->>DB: SELECT … WHERE created_at < T8.createdAt LIMIT 2
     DB-->>S: [T7, T6]
     S-->>H: rows=[T7,T6], next=T6.createdAt
-    H-->>C: 200 OK<br/>{transfers:[T7,T6], nextCursor:"2026-…"}
+    H-->>C: 200 OK<br/>(transfers:[T7,T6], nextCursor:"2026-…")
 
     Note over C: Final page — fewer than `limit` rows returned.
     C->>H: GET /wallets/W/transfers?limit=2&before=T6.createdAt
@@ -1001,7 +1000,7 @@ sequenceDiagram
     DB-->>S: [T5]                ← only one row left
     S->>S: page NOT full ⇒ next = nil
     S-->>H: rows=[T5], next=nil
-    H-->>C: 200 OK<br/>{transfers:[T5]}   ← no nextCursor → done
+    H-->>C: 200 OK<br/>(transfers:[T5])   ← no nextCursor → done
 
     Note over C,DB: Total: 5 transfers retrieved in 3 pages.<br/>Cursor is the createdAt timestamp of the last item per page.
 ```
