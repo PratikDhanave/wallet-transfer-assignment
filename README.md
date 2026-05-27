@@ -117,7 +117,7 @@ flowchart LR
         end
     end
 
-    subgraph DB [(PostgreSQL)]
+    subgraph DB[PostgreSQL]
         W[(wallets)]
         T[(transfers)]
         L[(ledger_entries)]
@@ -727,14 +727,15 @@ sequenceDiagram
     S->>W: LockForUpdate(max(from,to))
     W->>DB: SELECT * FROM wallets WHERE id=$1 FOR UPDATE
 
-    S->>W: Get(from); Get(to)
+    S->>W: Get(from)
+    S->>W: Get(to)
     S->>S: balance >= amount ✓
 
     S->>T: Insert(transfer state=PENDING)
     T->>DB: INSERT transfers (CHECK constraints fire)
 
     S->>I: Insert(key, hash, transferID)
-    I->>DB: INSERT idempotency_records<br/>(PK lock; 23505 on conflict)
+    I->>DB: INSERT idempotency_records<br/>(PK lock, 23505 on conflict)
 
     S->>W: UpdateBalance(from, -amount)
     W->>DB: UPDATE wallets ... CHECK balance >= 0
@@ -828,7 +829,8 @@ sequenceDiagram
         W->>DB: SELECT … FOR UPDATE
         S->>W: LockForUpdate(max(from,to))
         W->>DB: SELECT … FOR UPDATE
-        S->>W: Get(from); Get(to)
+        S->>W: Get(from)
+        S->>W: Get(to)
 
         S->>T: Insert(transfer state=PENDING)
         T->>DB: INSERT transfers (CHECK fires)
