@@ -41,6 +41,7 @@ ledger semantics, durable idempotency, and safe concurrency. See
 - [How to run](#how-to-run)
 - [pprof](#pprof)
 - [Observability — Prometheus metrics + OpenTelemetry tracing](#observability--prometheus-metrics--opentelemetry-tracing)
+- [Concurrency and scale](#concurrency-and-scale)
 - [How to test](#how-to-test)
 - [Test coverage](#test-coverage)
 - [Tradeoffs and assumptions](#tradeoffs-and-assumptions)
@@ -1534,11 +1535,15 @@ the cursor back as `?before=...` on the next request.
 Read from environment variables at startup. See
 [`internal/config/config.go`](internal/config/config.go).
 
-| Variable        | Required | Default            | Meaning                                                                                  |
-|-----------------|----------|--------------------|------------------------------------------------------------------------------------------|
-| `DATABASE_URL`  | yes      | –                  | Postgres DSN (`postgres://…`)                                                            |
-| `HTTP_ADDR`     | no       | `:8080`            | Address the HTTP server binds to                                                         |
-| `DEBUG_ADDR`    | no       | (empty = disabled) | If set, starts the pprof admin listener on this address. **Use loopback only.** See [pprof](#pprof). |
+| Variable | Required | Default | Meaning |
+|---|---|---:|---|
+| `DATABASE_URL` | yes | – | Postgres DSN (`postgres://…`) |
+| `HTTP_ADDR` | no | `:8080` | Address the HTTP server binds to |
+| `DEBUG_ADDR` | no | (empty = disabled) | If set, starts the pprof admin listener on this address. **Use loopback only.** See [pprof](#pprof). |
+| `DB_MAX_OPEN_CONNS` | no | 25 | Cap on concurrent DB connections. Raise in lock-step with Postgres's `max_connections` |
+| `DB_MAX_IDLE_CONNS` | no | 5 | Connections kept warm between requests |
+| `DB_CONN_MAX_LIFETIME` | no | `5m` | Max age before the pool retires a connection (set lower than upstream LB / pgbouncer idle cut) |
+| `DB_CONN_MAX_IDLE_TIME` | no | `1m` | Max idle before the pool closes a connection |
 
 ---
 
@@ -1667,9 +1672,113 @@ required.
 
 ---
 
-## How to test
+## Concurrency and scale
+
+What this service can handle and how that's proven. All numbers
+below are **measured** on an Apple M1 Max with a local Postgres 16
+container; rerun the same `make` targets to reproduce.
+
+### Throughput numbers
+
+#### Sustained HTTP load (k6, 60s at 300 RPS, 20 wallet pairs)
+
+| Metric | Value |
+|---|---:|
+| Requests served | 17,999 |
+| Requests/sec sustained | 297 |
+| Failed requests | 0 (0.00%) |
+| Transfers completed (PROCESSED) | 17,959 |
+| Latency p50 | 23 ms |
+| Latency p95 | 83 ms |
+| Latency p99 | 298 ms |
+| Latency max | 964 ms |
+
+Reproduce with `make db-up && make run` (one terminal) and
+`make load` (another). See [`loadtest/transfer.js`](loadtest/transfer.js)
+for the scenario. Override `RPS=`, `DURATION=`, `WALLETS=`,
+`BASE_URL=` to explore the response curve.
+
+#### Go service-layer benchmarks (`make bench`)
+
+| Benchmark | ns/op | B/op | allocs/op | Throughput |
+|---|---:|---:|---:|---:|
+| `TransferService.Create` (sequential) | 15,386,689 | 17,019 | 404 | ~65 tx/s |
+| `TransferService.Create` (b.RunParallel) | 13,111,824 | 18,809 | 412 | ~76 tx/s |
+| `TransferService.GetTransfer` | 988,106 | 2,354 | 63 | ~1,011 ops/s |
+| `TransferService.ListTransfersByWallet` | 1,815,936 | 36,680 | 590 | ~550 ops/s |
+| `TransferService.IdempotentReplay` (fast path) | 2,050,488 | 4,228 | 101 | ~488 ops/s |
+
+The replay number deserves a comment: it's slower per op than
+`GetTransfer` only because it does two SELECTs (idempotency lookup
++ transfer lookup) instead of one. It is still ~7× faster than a
+fresh `Create` because it never opens a transaction or takes a
+wallet lock.
+
+#### Stress tests (`make stress`)
+
+| Test | Goroutines / requests | Wall time | Result |
+|---|---|---|---|
+| `TestStress_HotWallet` | 1,000 goroutines × 1 debit each, one source wallet, balance 10,000 | ~10s | Exactly 100 PROCESSED + 900 FAILED. Source balance never < 0. Sum conserved. |
+| `TestStress_ManyWallets` | 10,000 transfers across 100 wallets via 50 workers | ~19s | 9,997 PROCESSED + 3 FAILED (insufficient funds on random pairs). 533 tx/s sustained. Conservation invariant holds across all 100 wallets. |
+| `TestStress_NoGoroutineLeak` | 200 transfers, then count goroutines before/after | ~3s | Δ = 0 |
+
+### What stays safe under that load
+
+| Concern | What protects it |
+|---|---|
+| Double-spend on a hot wallet | `SELECT ... FOR UPDATE` blocks concurrent debits until the holder commits. The schema's `CHECK (balance >= 0)` is the second line of defence. `TestStress_HotWallet` proves it under 1,000-goroutine contention. |
+| Deadlock between counter-direction transfers (A→B and B→A) | Both transactions acquire wallet locks in lexicographic id order via `orderedPair`. Postgres never detects a cycle. |
+| Duplicate transfers on retry | `idempotency_records.key` is a PRIMARY KEY; the second concurrent insert blocks on the PK index and then receives SQLSTATE 23505, which the service maps to the replay path. `TestCreateTransfer_ConcurrentSameKey` proves this at N=25; the load test proves it at scale. |
+| DB-connection exhaustion at high RPS | The pool is bounded via `DB_MAX_OPEN_CONNS` (default 25). Requests queue on a bounded waiter inside `database/sql` rather than opening unbounded connections and getting Postgres SQLSTATE 53300 ("too many clients already"). |
+| Goroutine leaks under sustained load | `TestStress_NoGoroutineLeak` snapshots `runtime.NumGoroutine` before / after a burst and asserts Δ ≤ slack. |
+
+### Where the bottleneck is, and how to push it further
+
+The single-Postgres ceiling on this workload, on this hardware, is
+~300 req/s before the DB-pool saturation starts pushing p99 up.
+To go higher:
+
+1. **Raise the pool**: bump `DB_MAX_OPEN_CONNS` (and Postgres's
+   `max_connections`, of course) in lock-step. Each open connection
+   costs ~10 MB of Postgres RAM, so this is bounded.
+2. **Spread the hot wallet**: when one wallet is the bottleneck,
+   the lock is the bottleneck. The architecture is correct; the
+   physics aren't negotiable. Real systems shard at the wallet
+   level (route every request for wallet id X to the same shard
+   so different shards can run independent transactions).
+3. **Async / batch the ledger writes**: today every transfer does 2
+   ledger INSERTs synchronously. A batched outbox + worker would
+   move those out of the request path. Documented as a flip-point
+   in [§Design choices #3](#3-single-transaction-per-request-not-saga--outbox).
+4. **Read replica for history queries**: `GET /wallets/{id}/transfers`
+   is read-heavy and tolerates slight staleness. A second `*sql.DB`
+   bound to a replica would take history-list load off the
+   write primary entirely.
+
+### Pool tuning configuration
+
+| Env var | Default | When to raise |
+|---|---:|---|
+| `DB_MAX_OPEN_CONNS` | 25 | When RPS approaches the current pool-saturation ceiling (~300 RPS on this hardware) AND Postgres has free `max_connections` headroom |
+| `DB_MAX_IDLE_CONNS` | 5 | If traffic is bursty and you want connections kept warm between bursts |
+| `DB_CONN_MAX_LIFETIME` | 5m | Lower if your load balancer / pgbouncer cuts idle connections sooner than this (or you'd hand out half-closed conns) |
+| `DB_CONN_MAX_IDLE_TIME` | 1m | Lower to free Postgres connections faster during quiet periods |
+
+### Commands you'll actually run
 
 ```sh
+make db-up                                  # start Postgres
+make run                                    # start the API
+DEBUG_ADDR=127.0.0.1:6060 make run          # + pprof + /metrics
+make stress                                 # 1k-goroutine hot-wallet + 10k-transfer many-wallet stress, ~35s
+make bench                                  # Go service-layer benchmarks, ~90s
+make load                                   # k6 sustained-load test against `make run`, ~60s
+make pprof-cpu                              # capture a 30s CPU profile while load is running
+```
+
+---
+
+## How to test
 make test          # unit tests (no Docker needed)
 make test-int      # integration tests (testcontainers, requires Docker)
 make test-all      # both
