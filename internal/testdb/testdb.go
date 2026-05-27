@@ -40,17 +40,18 @@ var (
 // container is started lazily on first call; subsequent calls reuse
 // the same DB and just hand back the cached handle.
 //
-// Failure to start the container (or apply migrations) is reported
-// via t.Fatalf — there's nothing useful a test can do without a
-// database, so failing fast is friendlier than letting a NPE surface
-// downstream.
-func Get(t *testing.T) *sql.DB {
-	t.Helper()
+// Takes a testing.TB so it can be called from both *testing.T (Tests)
+// and *testing.B (Benchmarks). Failure to start the container (or
+// apply migrations) is reported via tb.Fatalf — there's nothing
+// useful a test can do without a database, so failing fast is
+// friendlier than letting a NPE surface downstream.
+func Get(tb testing.TB) *sql.DB {
+	tb.Helper()
 	once.Do(func() {
 		sharedDB, sharedErr = start()
 	})
 	if sharedErr != nil {
-		t.Fatalf("start postgres container: %v", sharedErr)
+		tb.Fatalf("start postgres container: %v", sharedErr)
 	}
 	return sharedDB
 }
@@ -59,26 +60,27 @@ func Get(t *testing.T) *sql.DB {
 // starting it lazily if needed. Useful for tests that need to spawn
 // their own *sql.DB (for example, cmd/server tests that go through
 // config.Load).
-func DSN(t *testing.T) string {
-	t.Helper()
-	_ = Get(t)
+func DSN(tb testing.TB) string {
+	tb.Helper()
+	_ = Get(tb)
 	return sharedDSN
 }
 
-// Reset truncates every table. Call from the start of each test that
-// mutates data so tests do not see leftovers from prior runs.
+// Reset truncates every table. Call from the start of each test (or
+// benchmark) that mutates data so it does not see leftovers from
+// prior runs.
 //
 // RESTART IDENTITY CASCADE resets the BIGSERIAL counter on
 // ledger_entries — without it, ledger ids would creep upward across
 // tests and any test that asserts on specific ids would be flaky.
 // CASCADE follows FKs so we don't have to worry about ordering.
-func Reset(t *testing.T) {
-	t.Helper()
-	d := Get(t)
+func Reset(tb testing.TB) {
+	tb.Helper()
+	d := Get(tb)
 	_, err := d.ExecContext(context.Background(),
 		`TRUNCATE idempotency_records, ledger_entries, transfers, wallets RESTART IDENTITY CASCADE`)
 	if err != nil {
-		t.Fatalf("reset db: %v", err)
+		tb.Fatalf("reset db: %v", err)
 	}
 }
 
@@ -112,7 +114,17 @@ func start() (*sql.DB, error) {
 		return nil, fmt.Errorf("connection string: %w", err)
 	}
 	sharedDSN = dsn
-	d, err := db.Open(dsn)
+	// Bound the test-side pool so high-concurrency tests (stress
+	// tests, concurrent goroutine sweeps) cannot exhaust the
+	// container's max_connections=100. Production has its own
+	// bounds via cmd/server; mirror them here so test behaviour
+	// matches production behaviour under load.
+	d, err := db.OpenWithPool(dsn, db.PoolConfig{
+		MaxOpenConns:    25,
+		MaxIdleConns:    5,
+		ConnMaxLifetime: 5 * time.Minute,
+		ConnMaxIdleTime: 1 * time.Minute,
+	})
 	if err != nil {
 		return nil, err
 	}
