@@ -1,0 +1,80 @@
+SHELL := /bin/bash
+
+DATABASE_URL ?= postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable
+HTTP_ADDR    ?= :8080
+DEBUG_ADDR   ?= 127.0.0.1:6060   # pprof admin listener; set to empty to disable
+
+.PHONY: help
+help:
+	@echo "Targets:"
+	@echo "  db-up           Start Postgres via docker compose"
+	@echo "  db-down         Stop Postgres"
+	@echo "  run             Run the HTTP server"
+	@echo "  build           Build the server binary"
+	@echo "  test            Run unit tests"
+	@echo "  test-int        Run integration tests (requires Docker)"
+	@echo "  test-all        Run unit + integration tests"
+	@echo "  lint            Run golangci-lint (default tag)"
+	@echo "  lint-int        Run golangci-lint with integration build tag"
+	@echo "  fmt-check       Verify gofmt compliance"
+	@echo "  tidy            go mod tidy"
+	@echo "  pprof-heap      Open the heap profile (web UI on :8081)"
+	@echo "  pprof-cpu       Capture a 30s CPU profile, open it (web UI on :8081)"
+	@echo "  pprof-goroutine Open the goroutine profile (web UI on :8081)"
+	@echo "  pprof-trace     Capture a 5s execution trace and open go tool trace"
+
+.PHONY: db-up
+db-up:
+	docker compose up -d postgres
+
+.PHONY: db-down
+db-down:
+	docker compose down
+
+.PHONY: build
+build:
+	go build -o bin/server ./cmd/server
+
+.PHONY: run
+run:
+	DATABASE_URL=$(DATABASE_URL) HTTP_ADDR=$(HTTP_ADDR) DEBUG_ADDR=$(DEBUG_ADDR) go run ./cmd/server
+
+# pprof helpers - the server must be running with DEBUG_ADDR set.
+.PHONY: pprof-heap pprof-cpu pprof-goroutine pprof-trace
+
+pprof-heap:
+	go tool pprof -http=:8081 http://$(DEBUG_ADDR)/debug/pprof/heap
+
+pprof-cpu:
+	go tool pprof -http=:8081 http://$(DEBUG_ADDR)/debug/pprof/profile?seconds=30
+
+pprof-goroutine:
+	go tool pprof -http=:8081 http://$(DEBUG_ADDR)/debug/pprof/goroutine
+
+pprof-trace:
+	curl -s -o trace.out http://$(DEBUG_ADDR)/debug/pprof/trace?seconds=5 && go tool trace trace.out
+
+.PHONY: test
+test:
+	go test -race -cover ./...
+
+.PHONY: test-int
+test-int:
+	go test -tags=integration -race -count=1 -timeout=300s ./...
+
+.PHONY: test-all
+test-all: test test-int
+
+.PHONY: lint lint-int
+lint:
+	golangci-lint run ./...
+lint-int:
+	golangci-lint run --build-tags=integration ./...
+
+.PHONY: fmt-check
+fmt-check:
+	test -z "$$(gofmt -l .)"
+
+.PHONY: tidy
+tidy:
+	go mod tidy

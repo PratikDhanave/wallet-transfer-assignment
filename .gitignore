@@ -2,6 +2,30 @@
 coverage/
 dist/
 build/
+bin/
 .tmp/
 .env
 .env.*
+
+# Per-user Claude Code state; project-wide settings.json and commands/ are tracked.
+.claude/settings.local.json
+.claude/state/
+.claude/.last_synced
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Test artefacts
+coverage.out
+coverage.html
+*.test
+*.prof
+
+# AI session transcript — emailed to reviewer per ASSIGNMENT.md §AI usage,
+# not pushed to the repo. Keep the file locally so it can be attached
+# to the submission email, but never commit it.
+AI_TRANSCRIPT.md
+AI_PROMPTS.md
+ai-session.md
