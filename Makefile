@@ -21,6 +21,8 @@ help:
 	@echo "  lint-int        Run golangci-lint with integration build tag"
 	@echo "  fmt-check       Verify gofmt compliance"
 	@echo "  tidy            go mod tidy"
+	@echo "  govulncheck     Source-level CVE reachability scan (installs the tool if missing)"
+	@echo "  security-check  Full local pre-push gate: fmt + vet + lint + govulncheck"
 	@echo "  pprof-heap      Open the heap profile (web UI on :8081)"
 	@echo "  pprof-cpu       Capture a 30s CPU profile, open it (web UI on :8081)"
 	@echo "  pprof-goroutine Open the goroutine profile (web UI on :8081)"
@@ -106,3 +108,26 @@ fmt-check:
 .PHONY: tidy
 tidy:
 	go mod tidy
+
+# Source-level CVE reachability scan. Walks the import graph from main
+# and reports only vulnerabilities your code can actually reach — much
+# stricter than Dependabot, which flags any version match.
+#
+# Installs govulncheck on demand so contributors don't need to remember
+# the `go install` line. `command -v` makes this idempotent.
+.PHONY: govulncheck
+govulncheck:
+	@command -v govulncheck >/dev/null 2>&1 || \
+	    { echo ">> installing govulncheck"; go install golang.org/x/vuln/cmd/govulncheck@latest; }
+	govulncheck -mode=source ./...
+
+# Composite gate that mirrors what CI checks plus the source-level vuln
+# scan. Run this before `git push` to catch the same things CI will.
+.PHONY: security-check
+security-check: fmt-check
+	go vet ./...
+	go vet -tags=integration ./...
+	$(MAKE) lint
+	$(MAKE) lint-int
+	$(MAKE) govulncheck
+	@echo ">> security-check passed"
