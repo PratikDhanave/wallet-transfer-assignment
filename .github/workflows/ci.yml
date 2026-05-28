@@ -36,13 +36,20 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
+          # 1.24 matches the floor declared in go.mod. Bumping
+          # pgx/v5 ≥ 5.9.0, OpenTelemetry ≥ v1.42.0, or
+          # testcontainers-go ≥ v0.41.0 would force this up to 1.25.
           go-version: '1.24'
 
       - name: Install golangci-lint
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
-            | sh -s -- -b "$HOME/.local/bin" v1.64.8
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        # Build from source via `go install` so the resulting binary
+        # is compiled with the same Go toolchain the workflow uses
+        # above. Published binary releases of older golangci-lint
+        # versions are built with a fixed Go and trip the "language
+        # version used to build golangci-lint is lower than the
+        # targeted Go version" check when the module's go directive
+        # is higher. Building locally sidesteps that.
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
 
       - name: gofmt check
         run: |
@@ -63,5 +70,12 @@ jobs:
 
       - name: Integration tests
         env:
+          # The job's `services.postgres` block above exposes Postgres
+          # on localhost:5432 with the wallet/wallet/wallet creds.
+          # internal/testdb reads DATABASE_URL and skips integration
+          # tests when it's unset.
           DATABASE_URL: postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable
-        run: go test -race -tags=integration -count=1 -timeout=300s ./...
+        # `-p 1` forces one package binary at a time. Cross-package
+        # parallelism would let two packages TRUNCATE the same shared
+        # Postgres mid-test.
+        run: go test -race -tags=integration -count=1 -timeout=300s -p 1 ./...

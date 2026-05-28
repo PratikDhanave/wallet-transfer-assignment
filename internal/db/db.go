@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	migratepg "github.com/golang-migrate/migrate/v4/database/postgres"
@@ -40,10 +41,50 @@ var migrationsFS embed.FS
 // host produces a synchronous error at startup rather than a delayed
 // error on the first query — much friendlier when debugging a
 // deployment.
+//
+// The connection pool is left at pgx's defaults; callers that want
+// to bound the pool should pass a non-nil PoolConfig via OpenWithPool.
+// Both helpers are intentionally separate: Open keeps test setup
+// trivial, OpenWithPool is what production wiring uses.
 func Open(dsn string) (*sql.DB, error) {
+	return OpenWithPool(dsn, PoolConfig{})
+}
+
+// PoolConfig captures the four database/sql pool knobs that matter
+// for production capacity. A zero-value PoolConfig leaves the pool at
+// pgx defaults (unbounded MaxOpenConns, etc.) — appropriate for
+// tests but NOT for production.
+//
+// In production, populate every field. See internal/config for
+// recommended defaults; see README "Concurrency and scale" for the
+// rationale behind each value.
+type PoolConfig struct {
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+	ConnMaxIdleTime time.Duration
+}
+
+// OpenWithPool opens the database and applies the given pool tuning
+// before pinging. Apply order matters: we set the limits before the
+// first Ping so that Ping itself respects them (it borrows a
+// connection from the pool).
+func OpenWithPool(dsn string, pool PoolConfig) (*sql.DB, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sql.Open: %w", err)
+	}
+	if pool.MaxOpenConns > 0 {
+		db.SetMaxOpenConns(pool.MaxOpenConns)
+	}
+	if pool.MaxIdleConns > 0 {
+		db.SetMaxIdleConns(pool.MaxIdleConns)
+	}
+	if pool.ConnMaxLifetime > 0 {
+		db.SetConnMaxLifetime(pool.ConnMaxLifetime)
+	}
+	if pool.ConnMaxIdleTime > 0 {
+		db.SetConnMaxIdleTime(pool.ConnMaxIdleTime)
 	}
 	if err := db.Ping(); err != nil {
 		_ = db.Close()

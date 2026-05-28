@@ -104,11 +104,22 @@ func run(ctx context.Context, cfg config.Config) error {
 	}()
 
 	// 1. Database + migrations.
-	database, err := db.Open(cfg.DatabaseURL)
+	database, err := db.OpenWithPool(cfg.DatabaseURL, db.PoolConfig{
+		MaxOpenConns:    cfg.DBMaxOpenConns,
+		MaxIdleConns:    cfg.DBMaxIdleConns,
+		ConnMaxLifetime: cfg.DBConnMaxLifetime,
+		ConnMaxIdleTime: cfg.DBConnMaxIdleTime,
+	})
 	if err != nil {
 		return err
 	}
 	defer database.Close()
+	slog.Info("db pool configured",
+		"max_open", cfg.DBMaxOpenConns,
+		"max_idle", cfg.DBMaxIdleConns,
+		"conn_max_lifetime", cfg.DBConnMaxLifetime,
+		"conn_max_idle_time", cfg.DBConnMaxIdleTime,
+	)
 
 	if err := db.Migrate(database); err != nil {
 		return err

@@ -17,14 +17,18 @@ is cheap; a duplicate debit is not.
 
 ## 0. Project context (read first)
 
-- **Language / runtime:** Go 1.24+.
+- **Language / runtime:** Go 1.24+ (the floor declared in `go.mod`;
+  bumping pgx/v5 ≥ 5.9.0, OpenTelemetry ≥ v1.42.0, or
+  testcontainers-go ≥ v0.41.0 would force it up to 1.25).
 - **HTTP:** stdlib `net/http` with Go 1.22 method-aware `ServeMux`. No web
   framework.
 - **Database:** PostgreSQL 16 via `database/sql` + the `pgx` driver. No ORM.
 - **Schema migrations:** `golang-migrate`, SQL files embedded via
   `go:embed`. Forward-only.
-- **Tests:** `testcontainers-go` for integration tests, gated by
-  `//go:build integration`.
+- **Tests:** integration tests are gated by `//go:build integration` and
+  read `DATABASE_URL` (a real Postgres provided by docker-compose locally
+  or the CI `services.postgres` block). No testcontainers — that
+  dependency would force the Go floor up to 1.25.
 - **Architecture:** strict layering, dependencies point inward
   (`handler → service → repository → DB`), with `domain` as a leaf package.
 
@@ -317,7 +321,10 @@ in the repository layer.
 
 - **Unit tests** live next to the code (`*_test.go`, no build tag).
 - **Integration tests** are gated with `//go:build integration` and use
-  `internal/testdb` to spin up real Postgres via `testcontainers-go`.
+  `internal/testdb`, which connects to the Postgres pointed at by
+  `DATABASE_URL` (skip the test if the env var is unset). Locally:
+  `make db-up && make test-int`. In CI: the workflow runs a
+  `postgres:16-alpine` service container and sets `DATABASE_URL`.
 - New service / handler logic gets at least one integration test.
 - Concurrency-sensitive code gets a multi-goroutine test that asserts
   the invariant under load.
@@ -454,7 +461,7 @@ other agents.
 |---|---|---|
 | [`postgres-tx-safety`](.claude/skills/postgres-tx-safety/SKILL.md) | Editing SQL, transactions, locking, or balance logic (anything under `internal/repository/`, `internal/service/`, `migrations/`) | Parameterised-SQL templates, RunInTx + lock-order patterns, idempotency template, SQLSTATE map, anti-pattern table |
 | [`wallet-migration`](.claude/skills/wallet-migration/SKILL.md) | Adding or altering tables, columns, indexes, CHECK / UNIQUE / FK constraints | 6-step authoring workflow including the dual `migrations/` + `internal/db/migrations/` sync, patterns for the common DDL operations, house rules |
-| [`wallet-integration-test`](.claude/skills/wallet-integration-test/SKILL.md) | Writing or modifying integration tests in `internal/service/` or `internal/handler/` | testcontainers + `testdb.Reset` patterns, service-level / HTTP / concurrency / same-key collapsing test templates |
+| [`wallet-integration-test`](.claude/skills/wallet-integration-test/SKILL.md) | Writing or modifying integration tests in `internal/service/` or `internal/handler/` | `DATABASE_URL`-backed `testdb.Get` + `testdb.Reset` patterns, service-level / HTTP / concurrency / same-key collapsing test templates |
 
 ### Slash commands (explicit invocation)
 

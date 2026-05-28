@@ -24,8 +24,10 @@ coverage.html
 *.prof
 
 # AI session transcript — emailed to reviewer per ASSIGNMENT.md §AI usage,
-# not pushed to the repo. Keep the file locally so it can be attached
-# to the submission email, but never commit it.
+# not pushed to the repo. Keep the file(s) locally so they can be attached
+# to the submission email, but never commit them.
 AI_TRANSCRIPT.md
+AI_TRANSCRIPT.html
+AI_TRANSCRIPT.pdf
 AI_PROMPTS.md
 ai-session.md

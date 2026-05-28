@@ -78,3 +78,86 @@ func TestLoad_DebugAddrCustom(t *testing.T) {
 		t.Fatalf("debug addr: %q", cfg.DebugAddr)
 	}
 }
+
+// TestLoad_DBPoolDefaults verifies the documented defaults land
+// in Config when the corresponding env vars are unset. These
+// defaults are the contract the README's "Concurrency and scale"
+// section quotes; changing one without updating the README would
+// drift the docs.
+func TestLoad_DBPoolDefaults(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("DB_MAX_OPEN_CONNS", "")
+	t.Setenv("DB_MAX_IDLE_CONNS", "")
+	t.Setenv("DB_CONN_MAX_LIFETIME", "")
+	t.Setenv("DB_CONN_MAX_IDLE_TIME", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DBMaxOpenConns != DefaultDBMaxOpenConns {
+		t.Fatalf("max open: got %d want %d", cfg.DBMaxOpenConns, DefaultDBMaxOpenConns)
+	}
+	if cfg.DBMaxIdleConns != DefaultDBMaxIdleConns {
+		t.Fatalf("max idle: got %d want %d", cfg.DBMaxIdleConns, DefaultDBMaxIdleConns)
+	}
+	if cfg.DBConnMaxLifetime != DefaultDBConnMaxLifetime {
+		t.Fatalf("max lifetime: got %v want %v", cfg.DBConnMaxLifetime, DefaultDBConnMaxLifetime)
+	}
+	if cfg.DBConnMaxIdleTime != DefaultDBConnMaxIdleTime {
+		t.Fatalf("max idle time: got %v want %v", cfg.DBConnMaxIdleTime, DefaultDBConnMaxIdleTime)
+	}
+}
+
+// TestLoad_DBPoolCustom verifies operator overrides take effect
+// across every tunable. Each subtest checks one var to keep
+// failure messages tightly scoped.
+func TestLoad_DBPoolCustom(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("DB_MAX_OPEN_CONNS", "100")
+	t.Setenv("DB_MAX_IDLE_CONNS", "20")
+	t.Setenv("DB_CONN_MAX_LIFETIME", "10m")
+	t.Setenv("DB_CONN_MAX_IDLE_TIME", "30s")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DBMaxOpenConns != 100 {
+		t.Fatalf("max open: %d", cfg.DBMaxOpenConns)
+	}
+	if cfg.DBMaxIdleConns != 20 {
+		t.Fatalf("max idle: %d", cfg.DBMaxIdleConns)
+	}
+	if cfg.DBConnMaxLifetime != 10*60*1e9 { // 10m
+		t.Fatalf("max lifetime: %v", cfg.DBConnMaxLifetime)
+	}
+	if cfg.DBConnMaxIdleTime != 30*1e9 { // 30s
+		t.Fatalf("max idle time: %v", cfg.DBConnMaxIdleTime)
+	}
+}
+
+// TestLoad_DBPoolRejectsBadValues asserts the fail-loud-on-parse
+// stance. A typo'd env var must surface as a Load error, not
+// silently revert to the default — otherwise the operator's
+// intent is lost.
+func TestLoad_DBPoolRejectsBadValues(t *testing.T) {
+	cases := []struct {
+		key, val string
+	}{
+		{"DB_MAX_OPEN_CONNS", "not-a-number"},
+		{"DB_MAX_OPEN_CONNS", "0"},
+		{"DB_MAX_OPEN_CONNS", "-5"},
+		{"DB_MAX_IDLE_CONNS", "abc"},
+		{"DB_CONN_MAX_LIFETIME", "five minutes"},
+		{"DB_CONN_MAX_LIFETIME", "0s"},
+		{"DB_CONN_MAX_IDLE_TIME", "1week"},
+	}
+	for _, c := range cases {
+		t.Run(c.key+"="+c.val, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://x")
+			t.Setenv(c.key, c.val)
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected error for %s=%q", c.key, c.val)
+			}
+		})
+	}
+}

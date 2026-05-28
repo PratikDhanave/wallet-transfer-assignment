@@ -1,11 +1,11 @@
 ---
 name: wallet-integration-test
-description: Use this skill when writing or modifying integration tests for the wallet-transfer service — that is, tests that hit a real PostgreSQL database (via testcontainers) rather than mocks. Trigger when the user asks to "add a test", "test concurrency", "test idempotency", "test the HTTP endpoint", "add an integration test", "increase coverage", or whenever a new service/handler method needs corresponding test coverage. Trigger especially when editing files under internal/service/ or internal/handler/ that introduce a new code path. Do NOT trigger for pure unit tests on internal/domain/ (those are plain table-driven Go tests, no DB needed) or for documentation-only edits.
+description: Use this skill when writing or modifying integration tests for the wallet-transfer service — that is, tests that hit a real PostgreSQL database (provided by docker-compose locally or the CI postgres service container) rather than mocks. Trigger when the user asks to "add a test", "test concurrency", "test idempotency", "test the HTTP endpoint", "add an integration test", "increase coverage", or whenever a new service/handler method needs corresponding test coverage. Trigger especially when editing files under internal/service/ or internal/handler/ that introduce a new code path. Do NOT trigger for pure unit tests on internal/domain/ (those are plain table-driven Go tests, no DB needed) or for documentation-only edits.
 ---
 
 # wallet-integration-test
 
-This repo runs integration tests against a real Postgres container.
+This repo runs integration tests against a real Postgres instance.
 Pure-Go mocks for the DB are explicitly NOT used because the entire
 contract under test — locks, transactions, constraint enforcement, race
 conditions — is the database's behaviour. A mock would silently pass
@@ -17,19 +17,32 @@ Read [AGENTS.md](../../../AGENTS.md) §6 (Testing rules) before writing.
 
 ## How the test harness works
 
-`internal/testdb/testdb.go` exposes two functions:
+`internal/testdb/testdb.go` exposes three functions:
 
 ```go
 testdb.Get(t)      // *sql.DB pointing at a migrated database.
-                   // Container is started lazily on first call; reused
-                   // across all tests in the same package.
+                   // Opens it lazily on first call from $DATABASE_URL;
+                   // reused across all tests in the same package.
+                   // Skips the test if $DATABASE_URL is unset.
+
+testdb.DSN(t)      // The same DSN, for tests that need to construct
+                   // their own *sql.DB (e.g. cmd/server smoke tests).
 
 testdb.Reset(t)    // TRUNCATE every table. Call from the start of any
                    // test that mutates data.
 ```
 
-The container persists for the lifetime of the `go test` process and is
-torn down by the testcontainers reaper when the process exits.
+The connection persists for the lifetime of the `go test` process. The
+Postgres itself is provided externally:
+- **Locally:** `make db-up` (docker-compose), then export
+  `DATABASE_URL=postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable`.
+- **CI:** the `services.postgres` block in `.github/workflows/ci.yml`
+  starts `postgres:16-alpine` and the integration step sets
+  `DATABASE_URL` automatically.
+
+Run with `make test-int` (which passes `-p 1` to serialise test binaries
+across packages — they all share the one Postgres, so cross-package
+parallelism would let one package `TRUNCATE` mid-test in another).
 
 ---
 
@@ -232,14 +245,18 @@ debited exactly once regardless of how many duplicate requests arrived.
 
 ## Hygiene
 
-- Always run with `-race`:
+- Always run with `-race` and `-p 1`:
   ```sh
-  go test -race -tags=integration -count=1 -timeout=300s ./...
+  DATABASE_URL=postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable \
+    go test -race -tags=integration -count=1 -timeout=300s -p 1 ./...
   ```
 - `-count=1` is mandatory — Go caches test results by default and we do
   not want a stale cache hiding a regression.
-- `-timeout=300s` because the first run pulls the postgres image and
-  starts the container; subsequent runs are fast.
+- `-p 1` is mandatory — every package shares the one Postgres, and
+  parallel package binaries would let one `TRUNCATE` mid-test in another.
+  `make test-int` already sets this.
+- `-timeout=300s` because CI is sometimes slow to spin up the postgres
+  service container; local runs are fast.
 - Update the **Test coverage matrix** in [README.md](../../../README.md)
   whenever a new test is added that maps to an assignment requirement.
 

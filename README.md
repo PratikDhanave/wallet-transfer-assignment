@@ -41,6 +41,7 @@ ledger semantics, durable idempotency, and safe concurrency. See
 - [How to run](#how-to-run)
 - [pprof](#pprof)
 - [Observability — Prometheus metrics + OpenTelemetry tracing](#observability--prometheus-metrics--opentelemetry-tracing)
+- [Concurrency and scale](#concurrency-and-scale)
 - [How to test](#how-to-test)
 - [Test coverage](#test-coverage)
 - [Tradeoffs and assumptions](#tradeoffs-and-assumptions)
@@ -55,7 +56,9 @@ ledger semantics, durable idempotency, and safe concurrency. See
 - PostgreSQL 16, `database/sql` with the `pgx` driver
 - `golang-migrate` for schema migrations, embedded into the binary via
   `go:embed`
-- `testcontainers-go` for integration tests against a real Postgres
+- Integration tests run against a real Postgres provided externally
+  (docker-compose locally, `services.postgres` in CI) and read
+  `DATABASE_URL` from the environment
 - No web framework, no ORM
 
 ---
@@ -73,7 +76,7 @@ internal/
     postgres/                Postgres implementations + TxManager
   service/                   transfer + wallet business logic
   handler/                   thin HTTP handlers, JSON in/out, error mapping
-  testdb/                    shared testcontainers Postgres for tests
+  testdb/                    shared *sql.DB for tests, gated on $DATABASE_URL
 migrations/                  source-of-truth SQL migrations
 compose.yml                  Postgres for local development
 Makefile                     db-up, run, test, test-int, lint, fmt-check
@@ -91,40 +94,39 @@ dependencies and can be referenced from any layer.
 flowchart LR
     Client([HTTP client])
 
-    subgraph Entry [cmd/server]
-        Mux[net/http ServeMux<br/>method-aware patterns]
+    subgraph Entry["cmd/server"]
+        Mux["net/http ServeMux<br/>method-aware patterns"]
     end
 
-    subgraph H [internal/handler]
-        TH[TransferHandler<br/>POST /transfers]
-        WH[WalletHandler<br/>POST /wallets<br/>GET /wallets/&#123;id&#125;]
+    subgraph H["internal/handler"]
+        TH["TransferHandler<br/>POST /transfers"]
+        WH["WalletHandler<br/>POST /wallets<br/>GET /wallets/:id"]
     end
 
-    subgraph S [internal/service]
-        TS[TransferService<br/>idempotency + tx orchestration]
-        WS[WalletService]
+    subgraph S["internal/service"]
+        TS["TransferService<br/>idempotency + tx orchestration"]
+        WS["WalletService"]
     end
 
-    subgraph R [internal/repository]
-        direction TB
-        IF[Interfaces:<br/>WalletRepository<br/>TransferRepository<br/>LedgerRepository<br/>IdempotencyRepository<br/>TxManager]
-        subgraph PG [internal/repository/postgres]
-            PWR[WalletRepo]
-            PTR[TransferRepo]
-            PLR[LedgerRepo]
-            PIR[IdempotencyRepo]
-            PTX[TxManager]
+    subgraph R["internal/repository"]
+        IF["Interfaces:<br/>WalletRepository<br/>TransferRepository<br/>LedgerRepository<br/>IdempotencyRepository<br/>TxManager"]
+        subgraph PG["internal/repository/postgres"]
+            PWR["WalletRepo"]
+            PTR["TransferRepo"]
+            PLR["LedgerRepo"]
+            PIR["IdempotencyRepo"]
+            PTX["TxManager"]
         end
     end
 
-    subgraph DB [(PostgreSQL)]
+    subgraph DB["PostgreSQL"]
         W[(wallets)]
         T[(transfers)]
         L[(ledger_entries)]
         I[(idempotency_records)]
     end
 
-    D[internal/domain<br/>Wallet, Transfer, LedgerEntry<br/>state machine, errors]
+    D["internal/domain<br/>Wallet, Transfer, LedgerEntry<br/>state machine, errors"]
 
     Client --> Mux
     Mux --> TH
@@ -192,7 +194,7 @@ flowchart TB
         loki["Log aggregator<br/>(Loki / Datadog / etc.)"]
     end
 
-    client -->|"POST /transfers<br/>GET /wallets/{id}<br/>GET /wallets/{id}/transfers"| api
+    client -->|"POST /transfers<br/>GET /wallets/:id<br/>GET /wallets/:id/transfers"| api
     api --> mw --> biz
     biz -->|"BEGIN; ... COMMIT;"| pg
 
@@ -471,7 +473,7 @@ sequenceDiagram
     participant S as TransferService
     participant DB as Postgres
 
-    C->>H: POST /transfers {key, from, to, amount}
+    C->>H: POST /transfers (key, from, to, amount)
     H->>S: Create(req)
     Note over S: validate + hash request
 
@@ -494,7 +496,7 @@ sequenceDiagram
     S->>DB: UPDATE transfers SET state=PROCESSED
     S->>DB: COMMIT
 
-    S-->>H: Transfer{state=PROCESSED}
+    S-->>H: Transfer(state=PROCESSED)
     H-->>C: 200 OK + JSON body
 ```
 
@@ -514,7 +516,7 @@ sequenceDiagram
     C->>H: POST /transfers (same key, same body)
     H->>S: Create(req)
     S->>DB: SELECT idempotency_records WHERE key=$1
-    DB-->>S: row{request_hash, transfer_id}
+    DB-->>S: row(request_hash, transfer_id)
     Note over S: stored hash == new hash ✓
     S->>DB: SELECT transfers WHERE id=transfer_id
     DB-->>S: original Transfer
@@ -585,7 +587,7 @@ sequenceDiagram
 
     S->>DB: UPDATE transfers SET state=FAILED,<br/>failure_reason='insufficient funds'
     S->>DB: COMMIT
-    S-->>C: Transfer{state=FAILED, failureReason=...}
+    S-->>C: Transfer(state=FAILED, failureReason=...)
 ```
 
 No balance changes are persisted; no ledger entries are written; the
@@ -631,7 +633,7 @@ sequenceDiagram
     participant T as TransferRepo
     participant DB as Postgres
 
-    C->>H: GET /transfers/{id}
+    C->>H: GET /transfers/:id
     H->>H: uuid.Parse(id)
     Note over H: parse fail ⇒ 400
     H->>S: GetTransfer(id)
@@ -661,7 +663,7 @@ sequenceDiagram
     participant T as TransferRepo
     participant DB as Postgres
 
-    C->>H: GET /wallets/{id}/transfers?limit=N&before=TS
+    C->>H: GET /wallets/:id/transfers?limit=N&before=TS
     H->>H: parseListQuery(r) → limit, before
     Note over H: invalid query ⇒ 400
     H->>S: ListTransfersByWallet(id, limit, before)
@@ -676,7 +678,7 @@ sequenceDiagram
         S->>S: next = nil
     end
     S-->>H: rows + next
-    H-->>C: 200 OK<br/>{ transfers: [...], nextCursor: TS? }
+    H-->>C: 200 OK<br/>( transfers: [...], nextCursor: TS? )
 ```
 
 ### Request lifecycle (end-to-end)
@@ -727,14 +729,15 @@ sequenceDiagram
     S->>W: LockForUpdate(max(from,to))
     W->>DB: SELECT * FROM wallets WHERE id=$1 FOR UPDATE
 
-    S->>W: Get(from); Get(to)
+    S->>W: Get(from)
+    S->>W: Get(to)
     S->>S: balance >= amount ✓
 
     S->>T: Insert(transfer state=PENDING)
     T->>DB: INSERT transfers (CHECK constraints fire)
 
     S->>I: Insert(key, hash, transferID)
-    I->>DB: INSERT idempotency_records<br/>(PK lock; 23505 on conflict)
+    I->>DB: INSERT idempotency_records<br/>(PK lock, 23505 on conflict)
 
     S->>W: UpdateBalance(from, -amount)
     W->>DB: UPDATE wallets ... CHECK balance >= 0
@@ -747,10 +750,10 @@ sequenceDiagram
     S->>T: UpdateState(PROCESSED)
 
     TXM->>DB: COMMIT
-    S-->>H: Transfer{state=PROCESSED}
+    S-->>H: Transfer(state=PROCESSED)
     H-->>REC: 200 + body
     REC-->>ACL: pass-through
-    ACL->>LOG: slog.Info "http_request"<br/>{request_id, method, path, status, duration_ms}
+    ACL->>LOG: slog.Info "http_request"<br/>(request_id, method, path, status, duration_ms)
     ACL-->>RID: response
     RID-->>C: 200 + JSON + X-Request-Id header
 ```
@@ -793,7 +796,7 @@ sequenceDiagram
     participant L as LedgerRepo
     participant DB as PostgreSQL
 
-    C->>MW: POST /transfers {key, from, to, amount}
+    C->>MW: POST /transfers (key, from, to, amount)
     MW->>H: ServeHTTP
     H->>H: json.Decode(DisallowUnknownFields)
     H->>S: Create(req)
@@ -804,7 +807,7 @@ sequenceDiagram
     I->>DB: SELECT idempotency_records WHERE key=$1
 
     alt key already exists (fast-path replay)
-        DB-->>I: row{transfer_id, request_hash}
+        DB-->>I: row (transfer_id, request_hash)
         I-->>S: IdempotencyRecord
         alt hash matches
             S->>T: Get(transfer_id)
@@ -828,7 +831,8 @@ sequenceDiagram
         W->>DB: SELECT … FOR UPDATE
         S->>W: LockForUpdate(max(from,to))
         W->>DB: SELECT … FOR UPDATE
-        S->>W: Get(from); Get(to)
+        S->>W: Get(from)
+        S->>W: Get(to)
 
         S->>T: Insert(transfer state=PENDING)
         T->>DB: INSERT transfers (CHECK fires)
@@ -857,7 +861,7 @@ sequenceDiagram
                 T->>DB: UPDATE transfers
                 S-->>TXM: nil (commit FAILED outcome)
                 TXM->>DB: COMMIT
-                S-->>H: Transfer{FAILED}
+                S-->>H: Transfer (state=FAILED)
                 H-->>C: 200 OK with state=FAILED
             else sufficient funds (happy path)
                 S->>W: UpdateBalance(from, -amount)
@@ -872,13 +876,13 @@ sequenceDiagram
                 T->>DB: UPDATE transfers
                 S-->>TXM: nil
                 TXM->>DB: COMMIT
-                S-->>H: Transfer{PROCESSED}
+                S-->>H: Transfer (state=PROCESSED)
                 H-->>C: 200 OK
             end
         end
     end
 
-    Note over MW: AccessLog emits<br/>http_request {request_id, method, path, status, duration_ms}
+    Note over MW: AccessLog emits<br/>http_request (request_id, method, path, status, duration_ms)
 ```
 
 **Key takeaways**
@@ -911,25 +915,25 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     par fire same key K simultaneously
-        A->>SA: POST /transfers {key=K, ...}
+        A->>SA: POST /transfers (key=K, ...)
         SA->>DB: SELECT idempotency_records WHERE key=K
         DB-->>SA: ErrNoRows
         SA->>DB: BEGIN (txA)
-        SA->>DB: INSERT idempotency_records {key=K, ...}
+        SA->>DB: INSERT idempotency_records (key=K, ...)
         Note over DB: txA holds the PK index lock on K
     and
-        B->>SB: POST /transfers {key=K, ...}
+        B->>SB: POST /transfers (key=K, ...)
         SB->>DB: SELECT idempotency_records WHERE key=K
         DB-->>SB: ErrNoRows
         SB->>DB: BEGIN (txB)
-        SB->>DB: INSERT idempotency_records {key=K, ...}
+        SB->>DB: INSERT idempotency_records (key=K, ...)
         Note over DB: txB blocks on the PK<br/>(waiting for txA)
     end
 
     SA->>DB: …continue transfer flow (lock wallets,<br/>insert ledger, update state)…
     SA->>DB: COMMIT (txA)
     DB-->>SA: ok
-    SA-->>A: 200 OK + Transfer{id=T1}
+    SA-->>A: 200 OK + Transfer(id=T1)
 
     Note over DB: txA released its PK lock<br/>txB's INSERT now resumes…
     DB-->>SB: 23505 unique_violation
@@ -940,8 +944,8 @@ sequenceDiagram
     SB->>DB: SELECT idempotency_records WHERE key=K
     DB-->>SB: row from txA
     SB->>DB: SELECT transfers WHERE id=T1
-    DB-->>SB: Transfer{id=T1}
-    SB-->>B: 200 OK + Transfer{id=T1}
+    DB-->>SB: Transfer(id=T1)
+    SB-->>B: 200 OK + Transfer(id=T1)
 
     Note over A,B: Both clients received the SAME transfer id (T1).<br/>The source wallet was debited EXACTLY ONCE.<br/>Verified by TestCreateTransfer_ConcurrentSameKey at N=25.
 ```
@@ -982,7 +986,7 @@ sequenceDiagram
     DB-->>S: [T9, T8]   ← newest first
     S->>S: page is full ⇒ next = T8.CreatedAt
     S-->>H: rows=[T9,T8], next=T8.createdAt
-    H-->>C: 200 OK<br/>{transfers:[T9,T8], nextCursor:"2026-…"}
+    H-->>C: 200 OK<br/>(transfers:[T9,T8], nextCursor:"2026-…")
 
     Note over C: Subsequent page — pass nextCursor as `before`.
     C->>H: GET /wallets/W/transfers?limit=2&before=T8.createdAt
@@ -990,7 +994,7 @@ sequenceDiagram
     S->>DB: SELECT … WHERE created_at < T8.createdAt LIMIT 2
     DB-->>S: [T7, T6]
     S-->>H: rows=[T7,T6], next=T6.createdAt
-    H-->>C: 200 OK<br/>{transfers:[T7,T6], nextCursor:"2026-…"}
+    H-->>C: 200 OK<br/>(transfers:[T7,T6], nextCursor:"2026-…")
 
     Note over C: Final page — fewer than `limit` rows returned.
     C->>H: GET /wallets/W/transfers?limit=2&before=T6.createdAt
@@ -999,7 +1003,7 @@ sequenceDiagram
     DB-->>S: [T5]                ← only one row left
     S->>S: page NOT full ⇒ next = nil
     S-->>H: rows=[T5], next=nil
-    H-->>C: 200 OK<br/>{transfers:[T5]}   ← no nextCursor → done
+    H-->>C: 200 OK<br/>(transfers:[T5])   ← no nextCursor → done
 
     Note over C,DB: Total: 5 transfers retrieved in 3 pages.<br/>Cursor is the createdAt timestamp of the last item per page.
 ```
@@ -1213,11 +1217,14 @@ flows that touch external bank APIs, payment processors, or
 multiple internal microservices. None of that is in scope here —
 the assignment is explicitly a single-service exercise.
 
-### 4. Testcontainers (real Postgres) over sqlmock
+### 4. Real Postgres over sqlmock
 
-**What we picked.** Every integration test boots a real
-`postgres:16-alpine` container via `testcontainers-go`, applies the
-real migrations, and exercises the code through real SQL.
+**What we picked.** Every integration test runs against a real
+`postgres:16-alpine` (started by `docker compose up -d postgres` locally,
+or by the `services.postgres` block in CI), applies the real migrations
+on first use, and exercises the code through real SQL. `internal/testdb`
+reads `DATABASE_URL` and skips the test if it's unset, so the same
+`go test ./...` command works in both modes.
 
 ```go
 // internal/service/transfer_integration_test.go (excerpted)
@@ -1268,7 +1275,7 @@ func TestCreateTransfer_HappyPath(t *testing.T) {
 
 | | Pros | Cons |
 |---|---|---|
-| **Real DB (chosen)** | Tests the actual SQL contract — typos in `FOR UPDATE`, missing CHECK constraints, FK violations all surface. Concurrency tests genuinely test locking. Schema/code drift is impossible. | First test pays a ~2s container-boot cost. Requires Docker. Slightly heavier in CI. |
+| **Real DB (chosen)** | Tests the actual SQL contract — typos in `FOR UPDATE`, missing CHECK constraints, FK violations all surface. Concurrency tests genuinely test locking. Schema/code drift is impossible. | Requires a Postgres reachable via `$DATABASE_URL` (docker-compose or CI service container). Cross-package test parallelism must be disabled (`-p 1`) because all packages share one DB. |
 | **sqlmock** | Pure unit semantics. No external dependencies. Sub-millisecond tests. | Tests pass even if the SQL is wrong, the lock is missing, the FK is misnamed, or the constraint never existed. Mocks must be hand-kept in sync with reality — they routinely aren't. Concurrency races become untestable. |
 
 **When the alternative would be the right call.** Testing pure
@@ -1533,17 +1540,21 @@ the cursor back as `?before=...` on the next request.
 Read from environment variables at startup. See
 [`internal/config/config.go`](internal/config/config.go).
 
-| Variable        | Required | Default            | Meaning                                                                                  |
-|-----------------|----------|--------------------|------------------------------------------------------------------------------------------|
-| `DATABASE_URL`  | yes      | –                  | Postgres DSN (`postgres://…`)                                                            |
-| `HTTP_ADDR`     | no       | `:8080`            | Address the HTTP server binds to                                                         |
-| `DEBUG_ADDR`    | no       | (empty = disabled) | If set, starts the pprof admin listener on this address. **Use loopback only.** See [pprof](#pprof). |
+| Variable | Required | Default | Meaning |
+|---|---|---:|---|
+| `DATABASE_URL` | yes | – | Postgres DSN (`postgres://…`) |
+| `HTTP_ADDR` | no | `:8080` | Address the HTTP server binds to |
+| `DEBUG_ADDR` | no | (empty = disabled) | If set, starts the pprof admin listener on this address. **Use loopback only.** See [pprof](#pprof). |
+| `DB_MAX_OPEN_CONNS` | no | 25 | Cap on concurrent DB connections. Raise in lock-step with Postgres's `max_connections` |
+| `DB_MAX_IDLE_CONNS` | no | 5 | Connections kept warm between requests |
+| `DB_CONN_MAX_LIFETIME` | no | `5m` | Max age before the pool retires a connection (set lower than upstream LB / pgbouncer idle cut) |
+| `DB_CONN_MAX_IDLE_TIME` | no | `1m` | Max idle before the pool closes a connection |
 
 ---
 
 ## How to run
 
-Prerequisites: Go 1.24+, Docker (for local Postgres and integration tests).
+Prerequisites: Go 1.24+, Docker (for the local Postgres that integration tests connect to).
 
 ```sh
 make db-up         # starts postgres on :5432 via docker compose
@@ -1666,22 +1677,130 @@ required.
 
 ---
 
-## How to test
+## Concurrency and scale
+
+What this service can handle and how that's proven. All numbers
+below are **measured** on an Apple M1 Max with a local Postgres 16
+container; rerun the same `make` targets to reproduce.
+
+### Throughput numbers
+
+#### Sustained HTTP load (k6, 60s at 300 RPS, 20 wallet pairs)
+
+| Metric | Value |
+|---|---:|
+| Requests served | 17,999 |
+| Requests/sec sustained | 297 |
+| Failed requests | 0 (0.00%) |
+| Transfers completed (PROCESSED) | 17,959 |
+| Latency p50 | 23 ms |
+| Latency p95 | 83 ms |
+| Latency p99 | 298 ms |
+| Latency max | 964 ms |
+
+Reproduce with `make db-up && make run` (one terminal) and
+`make load` (another). See [`loadtest/transfer.js`](loadtest/transfer.js)
+for the scenario. Override `RPS=`, `DURATION=`, `WALLETS=`,
+`BASE_URL=` to explore the response curve.
+
+#### Go service-layer benchmarks (`make bench`)
+
+| Benchmark | ns/op | B/op | allocs/op | Throughput |
+|---|---:|---:|---:|---:|
+| `TransferService.Create` (sequential) | 15,386,689 | 17,019 | 404 | ~65 tx/s |
+| `TransferService.Create` (b.RunParallel) | 13,111,824 | 18,809 | 412 | ~76 tx/s |
+| `TransferService.GetTransfer` | 988,106 | 2,354 | 63 | ~1,011 ops/s |
+| `TransferService.ListTransfersByWallet` | 1,815,936 | 36,680 | 590 | ~550 ops/s |
+| `TransferService.IdempotentReplay` (fast path) | 2,050,488 | 4,228 | 101 | ~488 ops/s |
+
+The replay number deserves a comment: it's slower per op than
+`GetTransfer` only because it does two SELECTs (idempotency lookup
++ transfer lookup) instead of one. It is still ~7× faster than a
+fresh `Create` because it never opens a transaction or takes a
+wallet lock.
+
+#### Stress tests (`make stress`)
+
+| Test | Goroutines / requests | Wall time | Result |
+|---|---|---|---|
+| `TestStress_HotWallet` | 1,000 goroutines × 1 debit each, one source wallet, balance 10,000 | ~10s | Exactly 100 PROCESSED + 900 FAILED. Source balance never < 0. Sum conserved. |
+| `TestStress_ManyWallets` | 10,000 transfers across 100 wallets via 50 workers | ~19s | 9,997 PROCESSED + 3 FAILED (insufficient funds on random pairs). 533 tx/s sustained. Conservation invariant holds across all 100 wallets. |
+| `TestStress_NoGoroutineLeak` | 200 transfers, then count goroutines before/after | ~3s | Δ = 0 |
+
+### What stays safe under that load
+
+| Concern | What protects it |
+|---|---|
+| Double-spend on a hot wallet | `SELECT ... FOR UPDATE` blocks concurrent debits until the holder commits. The schema's `CHECK (balance >= 0)` is the second line of defence. `TestStress_HotWallet` proves it under 1,000-goroutine contention. |
+| Deadlock between counter-direction transfers (A→B and B→A) | Both transactions acquire wallet locks in lexicographic id order via `orderedPair`. Postgres never detects a cycle. |
+| Duplicate transfers on retry | `idempotency_records.key` is a PRIMARY KEY; the second concurrent insert blocks on the PK index and then receives SQLSTATE 23505, which the service maps to the replay path. `TestCreateTransfer_ConcurrentSameKey` proves this at N=25; the load test proves it at scale. |
+| DB-connection exhaustion at high RPS | The pool is bounded via `DB_MAX_OPEN_CONNS` (default 25). Requests queue on a bounded waiter inside `database/sql` rather than opening unbounded connections and getting Postgres SQLSTATE 53300 ("too many clients already"). |
+| Goroutine leaks under sustained load | `TestStress_NoGoroutineLeak` snapshots `runtime.NumGoroutine` before / after a burst and asserts Δ ≤ slack. |
+
+### Where the bottleneck is, and how to push it further
+
+The single-Postgres ceiling on this workload, on this hardware, is
+~300 req/s before the DB-pool saturation starts pushing p99 up.
+To go higher:
+
+1. **Raise the pool**: bump `DB_MAX_OPEN_CONNS` (and Postgres's
+   `max_connections`, of course) in lock-step. Each open connection
+   costs ~10 MB of Postgres RAM, so this is bounded.
+2. **Spread the hot wallet**: when one wallet is the bottleneck,
+   the lock is the bottleneck. The architecture is correct; the
+   physics aren't negotiable. Real systems shard at the wallet
+   level (route every request for wallet id X to the same shard
+   so different shards can run independent transactions).
+3. **Async / batch the ledger writes**: today every transfer does 2
+   ledger INSERTs synchronously. A batched outbox + worker would
+   move those out of the request path. Documented as a flip-point
+   in [§Design choices #3](#3-single-transaction-per-request-not-saga--outbox).
+4. **Read replica for history queries**: `GET /wallets/{id}/transfers`
+   is read-heavy and tolerates slight staleness. A second `*sql.DB`
+   bound to a replica would take history-list load off the
+   write primary entirely.
+
+### Pool tuning configuration
+
+| Env var | Default | When to raise |
+|---|---:|---|
+| `DB_MAX_OPEN_CONNS` | 25 | When RPS approaches the current pool-saturation ceiling (~300 RPS on this hardware) AND Postgres has free `max_connections` headroom |
+| `DB_MAX_IDLE_CONNS` | 5 | If traffic is bursty and you want connections kept warm between bursts |
+| `DB_CONN_MAX_LIFETIME` | 5m | Lower if your load balancer / pgbouncer cuts idle connections sooner than this (or you'd hand out half-closed conns) |
+| `DB_CONN_MAX_IDLE_TIME` | 1m | Lower to free Postgres connections faster during quiet periods |
+
+### Commands you'll actually run
 
 ```sh
+make db-up                                  # start Postgres
+make run                                    # start the API
+DEBUG_ADDR=127.0.0.1:6060 make run          # + pprof + /metrics
+make stress                                 # 1k-goroutine hot-wallet + 10k-transfer many-wallet stress, ~35s
+make bench                                  # Go service-layer benchmarks, ~90s
+make load                                   # k6 sustained-load test against `make run`, ~60s
+make pprof-cpu                              # capture a 30s CPU profile while load is running
+```
+
+---
+
+## How to test
 make test          # unit tests (no Docker needed)
-make test-int      # integration tests (testcontainers, requires Docker)
+make db-up         # start the docker-compose Postgres (only needed once)
+make test-int      # integration tests against $DATABASE_URL (with -p 1)
 make test-all      # both
 ```
 
-Integration tests boot a single shared Postgres 16 container per package
-(via `internal/testdb`), apply migrations, and truncate tables between
-subtests.
+`internal/testdb` opens one connection per `go test` process to the
+Postgres pointed at by `$DATABASE_URL`, applies migrations on first use,
+and truncates tables between subtests. If `$DATABASE_URL` is unset, every
+integration test is **skipped** — the same `go test ./...` command works
+in environments without Postgres.
 
 Cross-package coverage measurement:
 
 ```sh
-go test -race -tags=integration -count=1 -timeout=300s \
+DATABASE_URL=postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable \
+  go test -race -tags=integration -count=1 -timeout=300s -p 1 \
     -coverpkg=./... -coverprofile=coverage.out ./...
 go tool cover -func=coverage.out | tail -1
 go tool cover -html=coverage.out -o coverage.html   # for the browser view
