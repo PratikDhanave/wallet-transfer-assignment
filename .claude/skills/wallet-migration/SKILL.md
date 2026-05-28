@@ -100,10 +100,9 @@ Examples:
 
    For an integration-test check:
    ```sh
-   make test-int
+   make db-up        # docker-compose Postgres
+   make test-int     # applies migrations end to end against it
    ```
-   testcontainers will spin up a fresh DB and apply the migration end
-   to end.
 
 ---
 

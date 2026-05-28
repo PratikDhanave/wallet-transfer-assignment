@@ -12,10 +12,10 @@ help:
 	@echo "  run             Run the HTTP server"
 	@echo "  build           Build the server binary"
 	@echo "  test            Run unit tests"
-	@echo "  test-int        Run integration tests (requires Docker)"
+	@echo "  test-int        Run integration tests (needs DATABASE_URL -- see \`make db-up\`)"
 	@echo "  test-all        Run unit + integration tests"
 	@echo "  stress          Run stress tests (1k goroutines hot-wallet, 10k transfers, ~35s)"
-	@echo "  bench           Run Go benchmarks (~90s total)"
+	@echo "  bench           Run Go benchmarks (needs DATABASE_URL, ~90s total)"
 	@echo "  load            Run k6 HTTP load test against \`make run\` (requires k6)"
 	@echo "  lint            Run golangci-lint (default tag)"
 	@echo "  lint-int        Run golangci-lint with integration build tag"
@@ -62,17 +62,23 @@ test:
 	go test -race -cover ./...
 
 .PHONY: test-int
+# `-p 1` forces one test binary at a time. Cross-package parallelism
+# would let two packages TRUNCATE the same shared Postgres mid-test
+# (testdb.Reset is per-process but the DB is shared across processes).
 test-int:
-	go test -tags=integration -race -count=1 -timeout=300s ./...
+	DATABASE_URL=$(DATABASE_URL) \
+	  go test -tags=integration -race -count=1 -timeout=300s -p 1 ./...
 
 .PHONY: stress
 stress:
-	go test -tags='integration stress' -race -count=1 -timeout=600s \
+	DATABASE_URL=$(DATABASE_URL) \
+	  go test -tags='integration stress' -race -count=1 -timeout=600s \
 	    -run='Stress|NoGoroutineLeak' -v ./internal/service/...
 
 .PHONY: bench
 bench:
-	go test -tags=integration -bench=. -benchmem -benchtime=3s \
+	DATABASE_URL=$(DATABASE_URL) \
+	  go test -tags=integration -bench=. -benchmem -benchtime=3s \
 	    -run='^$$' -timeout=300s ./internal/service/...
 
 # HTTP-level load test. Requires `make db-up` and `make run` already

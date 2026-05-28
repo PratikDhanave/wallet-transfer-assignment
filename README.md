@@ -52,11 +52,13 @@ ledger semantics, durable idempotency, and safe concurrency. See
 
 ## Stack
 
-- Go 1.25+, standard library `net/http` (Go 1.22 method-aware `ServeMux`)
+- Go 1.24+, standard library `net/http` (Go 1.22 method-aware `ServeMux`)
 - PostgreSQL 16, `database/sql` with the `pgx` driver
 - `golang-migrate` for schema migrations, embedded into the binary via
   `go:embed`
-- `testcontainers-go` for integration tests against a real Postgres
+- Integration tests run against a real Postgres provided externally
+  (docker-compose locally, `services.postgres` in CI) and read
+  `DATABASE_URL` from the environment
 - No web framework, no ORM
 
 ---
@@ -74,7 +76,7 @@ internal/
     postgres/                Postgres implementations + TxManager
   service/                   transfer + wallet business logic
   handler/                   thin HTTP handlers, JSON in/out, error mapping
-  testdb/                    shared testcontainers Postgres for tests
+  testdb/                    shared *sql.DB for tests, gated on $DATABASE_URL
 migrations/                  source-of-truth SQL migrations
 compose.yml                  Postgres for local development
 Makefile                     db-up, run, test, test-int, lint, fmt-check
@@ -1215,11 +1217,14 @@ flows that touch external bank APIs, payment processors, or
 multiple internal microservices. None of that is in scope here —
 the assignment is explicitly a single-service exercise.
 
-### 4. Testcontainers (real Postgres) over sqlmock
+### 4. Real Postgres over sqlmock
 
-**What we picked.** Every integration test boots a real
-`postgres:16-alpine` container via `testcontainers-go`, applies the
-real migrations, and exercises the code through real SQL.
+**What we picked.** Every integration test runs against a real
+`postgres:16-alpine` (started by `docker compose up -d postgres` locally,
+or by the `services.postgres` block in CI), applies the real migrations
+on first use, and exercises the code through real SQL. `internal/testdb`
+reads `DATABASE_URL` and skips the test if it's unset, so the same
+`go test ./...` command works in both modes.
 
 ```go
 // internal/service/transfer_integration_test.go (excerpted)
@@ -1270,7 +1275,7 @@ func TestCreateTransfer_HappyPath(t *testing.T) {
 
 | | Pros | Cons |
 |---|---|---|
-| **Real DB (chosen)** | Tests the actual SQL contract — typos in `FOR UPDATE`, missing CHECK constraints, FK violations all surface. Concurrency tests genuinely test locking. Schema/code drift is impossible. | First test pays a ~2s container-boot cost. Requires Docker. Slightly heavier in CI. |
+| **Real DB (chosen)** | Tests the actual SQL contract — typos in `FOR UPDATE`, missing CHECK constraints, FK violations all surface. Concurrency tests genuinely test locking. Schema/code drift is impossible. | Requires a Postgres reachable via `$DATABASE_URL` (docker-compose or CI service container). Cross-package test parallelism must be disabled (`-p 1`) because all packages share one DB. |
 | **sqlmock** | Pure unit semantics. No external dependencies. Sub-millisecond tests. | Tests pass even if the SQL is wrong, the lock is missing, the FK is misnamed, or the constraint never existed. Mocks must be hand-kept in sync with reality — they routinely aren't. Concurrency races become untestable. |
 
 **When the alternative would be the right call.** Testing pure
@@ -1549,7 +1554,7 @@ Read from environment variables at startup. See
 
 ## How to run
 
-Prerequisites: Go 1.25+, Docker (for local Postgres and integration tests).
+Prerequisites: Go 1.24+, Docker (for the local Postgres that integration tests connect to).
 
 ```sh
 make db-up         # starts postgres on :5432 via docker compose
@@ -1780,18 +1785,22 @@ make pprof-cpu                              # capture a 30s CPU profile while lo
 
 ## How to test
 make test          # unit tests (no Docker needed)
-make test-int      # integration tests (testcontainers, requires Docker)
+make db-up         # start the docker-compose Postgres (only needed once)
+make test-int      # integration tests against $DATABASE_URL (with -p 1)
 make test-all      # both
 ```
 
-Integration tests boot a single shared Postgres 16 container per package
-(via `internal/testdb`), apply migrations, and truncate tables between
-subtests.
+`internal/testdb` opens one connection per `go test` process to the
+Postgres pointed at by `$DATABASE_URL`, applies migrations on first use,
+and truncates tables between subtests. If `$DATABASE_URL` is unset, every
+integration test is **skipped** — the same `go test ./...` command works
+in environments without Postgres.
 
 Cross-package coverage measurement:
 
 ```sh
-go test -race -tags=integration -count=1 -timeout=300s \
+DATABASE_URL=postgres://wallet:wallet@localhost:5432/wallet?sslmode=disable \
+  go test -race -tags=integration -count=1 -timeout=300s -p 1 \
     -coverpkg=./... -coverprofile=coverage.out ./...
 go tool cover -func=coverage.out | tail -1
 go tool cover -html=coverage.out -o coverage.html   # for the browser view
